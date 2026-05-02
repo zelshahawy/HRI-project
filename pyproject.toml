@@ -1,0 +1,13 @@
+[project]
+name = "hri-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "misty-sdk",
+    "requests>=2.33.1",
+]
+
+[tool.uv.sources]
+misty-sdk = { git = "https://github.com/MistyCommunity/Python-SDK.git" }
