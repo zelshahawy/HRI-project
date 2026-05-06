@@ -15,7 +15,7 @@ from mistyPy.Robot import Robot
 
 load_dotenv()
 
-MISTY_IP = "192.168.0.148"
+MISTY_IP = "128.135.202.240"
 HTTP_SERVER_PORT = 8000
 
 AUDIO_RATE = 16000
@@ -39,15 +39,8 @@ custom_actions = {
 
 COMMANDS_HELP = """
 WoZ Commands:
-  INTRODUCE              - Robot introduces itself
-  NEXT_PUZZLE <desc>     - Announce next puzzle
-  HINT <context>         - Give a hint
-  ERROR <context>        - React to participant error
-  SUCCESS <context>      - React to participant success
-  ENCOURAGE <context>    - Encourage participant
-  WRAP_UP                - End the session
+  HINT                   - Give a hint (listens to participant first)
   CUSTOM <message>       - Free-form prompt
-  LISTEN                 - Listen to participant and respond
   QUIT                   - Exit program
 """
 
@@ -65,53 +58,30 @@ def compute_rms(frame_bytes):
     return audioop.rms(frame_bytes, 2)
 
 
-def record_audio(output_path):
-    """Record from mic until silence is detected, save as WAV."""
-    p = pyaudio.PyAudio()
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=AUDIO_RATE,
-        input=True,
-        frames_per_buffer=AUDIO_CHUNK,
-    )
+MISTY_CAPTURE_FILENAME = "participant_capture.wav"
 
-    print("  [Listening...]")
-    frames = []
-    speech_started = False
-    silence_start = None
 
-    while True:
-        data = stream.read(AUDIO_CHUNK, exception_on_overflow=False)
-        frames.append(data)
-        rms = compute_rms(data)
+def record_audio(misty, output_path, duration=MAX_RECORDING_SECONDS):
+    """Record from Misty's microphone, save as WAV."""
+    import requests as req
+    import base64
 
-        if not speech_started:
-            if rms > SILENCE_THRESHOLD:
-                speech_started = True
-                silence_start = None
-        else:
-            if rms < SILENCE_THRESHOLD:
-                if silence_start is None:
-                    silence_start = time.time()
-                elif time.time() - silence_start > SILENCE_DURATION:
-                    break
-            else:
-                silence_start = None
+    print("  [Recording from Misty's mic...]")
+    misty.start_recording_audio(MISTY_CAPTURE_FILENAME)
+    time.sleep(duration)
+    misty.stop_recording_audio()
+    time.sleep(0.5)  # Give Misty time to finalize the file
 
-        if len(frames) > MAX_RECORDING_SECONDS * (AUDIO_RATE // AUDIO_CHUNK):
-            break
+    # Download the audio file from Misty
+    url = f"http://{MISTY_IP}/api/audio?FileName={MISTY_CAPTURE_FILENAME}&Base64=true"
+    response = req.get(url, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    audio_bytes = base64.b64decode(data["result"]["base64"])
 
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    wf = wave.open(output_path, "wb")
-    wf.setnchannels(1)
-    wf.setsampwidth(2)
-    wf.setframerate(AUDIO_RATE)
-    wf.writeframes(b"".join(frames))
-    wf.close()
+    with open(output_path, "wb") as f:
+        f.write(audio_bytes)
+    print("  [Recording saved]")
 
 
 def generate_speech(client, text, output_path):
@@ -150,6 +120,9 @@ def transcribe_audio(client, audio_path):
 
 def misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url):
     """Send prompt to LLM, generate speech, and have Misty perform."""
+    import requests as req
+    import base64
+
     raw_response = chat.send_message(prompt)
     response_data = json.loads(raw_response.text)
     msg = response_data["msg"]
@@ -168,9 +141,20 @@ def misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url)
     with wave.open(speech_file_local, "rb") as wf:
         audio_length = wf.getnframes() / wf.getframerate()
 
+    # Upload audio file directly to Misty
+    with open(speech_file_local, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+    upload_url = f"http://{MISTY_IP}/api/audio"
+    req.post(upload_url, json={
+        "FileName": "speech.wav",
+        "Data": audio_b64,
+        "ImmediatelyApply": False,
+        "OverwriteExisting": True,
+    }, timeout=15)
+
     # Play audio and perform expression
     misty.start_action(name=expression if expression in custom_actions else "reset")
-    misty.play_audio(speech_file_url, volume=30)
+    misty.play_audio("speech.wav", volume=30)
 
     # Wait for audio to finish
     time.sleep(audio_length + 0.5)
@@ -205,6 +189,10 @@ def main():
 
     # Setup Misty
     misty = Robot(MISTY_IP)
+
+    # Set volume (0-100)
+    misty.set_default_volume(20)
+
     for action_name, action_script in custom_actions.items():
         misty.create_action(name=action_name, script=action_script, overwrite=True)
     misty.change_led(100, 70, 160)
@@ -235,63 +223,23 @@ def main():
             if cmd == "QUIT":
                 break
 
-            elif cmd == "LISTEN":
-                # Listen to participant, transcribe, then respond
+            elif cmd == "HINT":
+                # Ask participant what's going on, then use their response as context
+                misty_speak(client, misty, chat, "HINT_ASK", speech_file_local, speech_file_url)
+
                 misty.change_led(0, 199, 252)
                 misty.start_action(name="listen")
-                record_audio(recording_path)
+                record_audio(misty, recording_path)
                 misty.change_led(100, 70, 160)
 
                 user_speech = transcribe_audio(client, recording_path)
                 print(f"  Participant: {user_speech}")
 
-                # Respond to participant
-                misty_speak(client, misty, chat, f"Participant said: {user_speech}", speech_file_local, speech_file_url)
+                misty_speak(client, misty, chat, f"HINT Context from participant: {user_speech}", speech_file_local, speech_file_url)
 
-            elif cmd in ("INTRODUCE", "NEXT_PUZZLE", "HINT", "ERROR", "SUCCESS", "ENCOURAGE", "WRAP_UP", "CUSTOM"):
-                # HINT always asks the participant for context first
-                always_ask = cmd in ("HINT",)
-                # These ask only if no context was provided by the researcher
-                needs_context = cmd in ("ERROR", "SUCCESS", "ENCOURAGE", "NEXT_PUZZLE")
-
-                if always_ask or (needs_context and not context):
-                    # Ask participant what's going on, then use their response as context
-                    misty_speak(client, misty, chat, f"{cmd}_ASK", speech_file_local, speech_file_url)
-
-                    misty.change_led(0, 199, 252)
-                    misty.start_action(name="listen")
-                    record_audio(recording_path)
-                    misty.change_led(100, 70, 160)
-
-                    user_speech = transcribe_audio(client, recording_path)
-                    print(f"  Participant: {user_speech}")
-
-                    prompt = f"{cmd} Context from participant: {user_speech}"
-                else:
-                    prompt = f"{cmd} {context}".strip()
-
+            elif cmd == "CUSTOM":
+                prompt = context if context else input("  Enter message: ").strip()
                 misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url)
-
-                # Follow-up loop for HINT: ask if they have more questions
-                if cmd == "HINT":
-                    while True:
-                        misty_speak(client, misty, chat, "FOLLOWUP_ASK", speech_file_local, speech_file_url)
-
-                        misty.change_led(0, 199, 252)
-                        misty.start_action(name="listen")
-                        record_audio(recording_path)
-                        misty.change_led(100, 70, 160)
-
-                        followup = transcribe_audio(client, recording_path)
-                        print(f"  Participant: {followup}")
-
-                        # Check if they said no / are done
-                        no_indicators = ["no", "nope", "i'm good", "that's it", "nothing", "all good", "i'm fine", "nah"]
-                        if any(ind in followup.lower() for ind in no_indicators):
-                            misty_speak(client, misty, chat, f"Participant said they have no more questions: {followup}", speech_file_local, speech_file_url)
-                            break
-                        else:
-                            misty_speak(client, misty, chat, f"HINT Context from participant follow-up question: {followup}", speech_file_local, speech_file_url)
 
             else:
                 print(f"  Unknown command: {cmd}")
