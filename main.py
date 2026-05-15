@@ -14,16 +14,25 @@ from mistyPy.Robot import Robot
 
 load_dotenv()
 
+<<<<<<< HEAD
 MISTY_IP = "128.135.202.116"
 HTTP_SERVER_PORT = 8000
 
 MAX_RECORDING_SECONDS = 6
 AUTO_FILLER_INTERVAL_SECONDS = 45
 AUTO_HINT_INTERVAL_SECONDS = 90
+=======
+MISTY_IP = "128.135.202.122"
+HTTP_SERVER_PORT = 8000
 
-LED_DEFAULT = (0, 0, 255)     # Idle: Blue
-LED_SPEAKING = (0, 255, 0)    # Speaking: Green
-LED_LISTENING = (255, 0, 0)   # Listening: Red
+MAX_RECORDING_SECONDS = 10
+AUTO_FILLER_INTERVAL_SECONDS = 45
+AUTO_HINT_INTERVAL_SECONDS = 120
+>>>>>>> 6cafd58986af4393fb1c640c939b831d937af797
+
+LED_DEFAULT = (0, 0, 255)  # Idle: Blue
+LED_SPEAKING = (0, 255, 0)  # Speaking: Green
+LED_LISTENING = (255, 0, 0)  # Listening: Red
 
 EYES_DEFAULT = "e_DefaultContent.jpg"
 EYES_SPEAKING = "e_Amazement.jpg"
@@ -44,10 +53,10 @@ custom_actions = {
 
 COMMANDS_HELP = """
 WoZ Commands:
-  INTRODUCE              - Robot introduces itself
-  HINT                   - Give a hint (listens to participant first)
-  FILLER                 - Say a non-puzzle filler phrase
-  QUIT                   - Exit program
+  INTRODUCE  - Robot introduces itself
+  HINT       - Give a hint (listens to participant first)
+  FILLER     - Say a non-puzzle filler phrase
+  QUIT       - Exit program
 """
 
 MISTY_CAPTURE_FILENAME = "participant_capture.wav"
@@ -62,22 +71,20 @@ def get_local_ip():
 
 
 def record_audio(misty, output_path, duration=MAX_RECORDING_SECONDS):
-    """Record from Misty's microphone, save as WAV."""
+    """Record from Misty's microphone for up to `duration` seconds, then save as WAV."""
     import requests as req
     import base64
 
     set_robot_state(misty, LED_LISTENING, EYES_LISTENING)
-    print("  [Recording from Misty's mic...]")
+    print(f"  [Recording for up to {duration}s...]")
     misty.start_recording_audio(MISTY_CAPTURE_FILENAME)
     end_time = time.monotonic() + duration
     while time.monotonic() < end_time:
-        # Re-assert listening state so animations or other robot states do not override it.
         set_robot_state(misty, LED_LISTENING, EYES_LISTENING)
         time.sleep(0.2)
     misty.stop_recording_audio()
-    time.sleep(0.5)  # Give Misty time to finalize the file
+    time.sleep(0.5)
 
-    # Download the audio file from Misty
     url = f"http://{MISTY_IP}/api/audio?FileName={MISTY_CAPTURE_FILENAME}&Base64=true"
     response = req.get(url, timeout=15)
     response.raise_for_status()
@@ -92,31 +99,25 @@ def record_audio(misty, output_path, duration=MAX_RECORDING_SECONDS):
 
 def generate_speech(client, text, output_path):
     """Generate TTS audio using Gemini and save as WAV."""
-    clean_text = text.strip()
     config = types.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                    voice_name="Kore",
-                )
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore")
             )
         ),
     )
-
-    # First attempt: raw text prompt.
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-tts",
-            contents=clean_text,
+            contents=text.strip(),
             config=config,
         )
         data = response.candidates[0].content.parts[0].inline_data.data
     except Exception:
-        # Retry with an explicit audio-only instruction for stricter TTS behavior.
         response = client.models.generate_content(
             model="gemini-2.5-flash-preview-tts",
-            contents=f"Read this transcript exactly. Output audio only: {clean_text}",
+            contents=f"Read this transcript exactly. Output audio only: {text.strip()}",
             config=config,
         )
         data = response.candidates[0].content.parts[0].inline_data.data
@@ -133,7 +134,10 @@ def transcribe_audio(client, audio_path):
     audio_file = client.files.upload(file=audio_path)
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=["Generate a transcript of the speech. Return only the transcribed text, nothing else.", audio_file],
+        contents=[
+            "Generate a transcript of the speech. Return only the transcribed text, nothing else.",
+            audio_file,
+        ],
     )
     return response.text.strip()
 
@@ -143,7 +147,7 @@ def set_robot_state(misty, led_color, eye_image):
     misty.display_image(fileName=eye_image)
 
 
-def misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url):
+def misty_speak(client, misty, chat, prompt, speech_file_local):
     """Send prompt to LLM, generate speech, and have Misty perform."""
     import requests as req
     import base64
@@ -157,39 +161,35 @@ def misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url)
 
     if not msg:
         print("  [No response generated]")
-        set_robot_state(misty, LED_DEFAULT, EYES_DEFAULT)
         return
 
     print(f"  Misty: {msg} [{expression}]")
 
     try:
-        # Generate TTS
         generate_speech(client, msg, speech_file_local)
 
-        # Get audio duration
         with wave.open(speech_file_local, "rb") as wf:
             audio_length = wf.getnframes() / wf.getframerate()
 
-        # Upload audio file directly to Misty
         with open(speech_file_local, "rb") as f:
             audio_b64 = base64.b64encode(f.read()).decode("utf-8")
-        upload_url = f"http://{MISTY_IP}/api/audio"
-        req.post(upload_url, json={
-            "FileName": "speech.wav",
-            "Data": audio_b64,
-            "ImmediatelyApply": False,
-            "OverwriteExisting": True,
-        }, timeout=15)
+        req.post(
+            f"http://{MISTY_IP}/api/audio",
+            json={
+                "FileName": "speech.wav",
+                "Data": audio_b64,
+                "ImmediatelyApply": False,
+                "OverwriteExisting": True,
+            },
+            timeout=15,
+        )
 
-        # Play audio and perform expression
         set_robot_state(misty, LED_SPEAKING, EYES_SPEAKING)
         misty.start_action(name=expression if expression in custom_actions else "reset")
         misty.play_audio("speech.wav", volume=30)
-
-        # Wait for audio to finish
         time.sleep(audio_length + 0.5)
+
     except Exception as ex:
-        # Fallback: use Misty's built-in speech if Gemini TTS fails.
         print(f"  [Gemini TTS failed, using Misty built-in speech: {ex}]")
         set_robot_state(misty, LED_SPEAKING, EYES_SPEAKING)
         misty.start_action(name=expression if expression in custom_actions else "reset")
@@ -205,18 +205,13 @@ def main():
         sys.exit(1)
 
     condition = sys.argv[1]
-    instruction_file = f"system_instruction_{condition}.txt"
-
     print(f"=== Escape the Reg — {condition.upper()} condition ===\n")
 
-    # Gemini client
     client = genai.Client(api_key=os.getenv("GOOGLE_GEMINI_API_KEY"))
 
-    # Load system instruction
-    with open(instruction_file) as f:
+    with open(f"system_instruction_{condition}.txt") as f:
         system_instruction = f.read()
 
-    # Create Gemini chat session
     chat = client.chats.create(
         model="gemini-2.5-flash",
         config=types.GenerateContentConfig(
@@ -226,23 +221,16 @@ def main():
         ),
     )
 
-    # Setup Misty
     misty = Robot(MISTY_IP)
-
-    # Set volume (0-100)
     misty.set_default_volume(30)
-
-    for action_name, action_script in custom_actions.items():
-        misty.create_action(name=action_name, script=action_script, overwrite=True)
+    for name, script in custom_actions.items():
+        misty.create_action(name=name, script=script, overwrite=True)
     set_robot_state(misty, LED_DEFAULT, EYES_DEFAULT)
     misty.start_action(name="reset")
 
-    # Paths for speech files
-    local_ip = get_local_ip()
     speech_dir = os.path.join(os.path.dirname(__file__), "robot_speech_files")
     os.makedirs(speech_dir, exist_ok=True)
     speech_file_local = os.path.join(speech_dir, "speech.wav")
-    speech_file_url = f"http://{local_ip}:{HTTP_SERVER_PORT}/robot_speech_files/speech.wav"
     recording_path = os.path.join(speech_dir, "recording.wav")
 
     stop_auto_prompts = threading.Event()
@@ -272,9 +260,57 @@ def main():
         print(f"  Participant: {user_speech}")
         misty_speak(client, misty, chat, f"HINT Context from participant: {user_speech}", speech_file_local, speech_file_url)
 
+    def speak(prompt):
+        misty_speak(client, misty, chat, prompt, speech_file_local)
+
+    def do_hint_flow():
+        """Ask participant what they need, listen, give a hint, then offer one follow-up."""
+        speak("HINT_ASK")
+
+        misty.start_action(name="listen")
+        record_audio(misty, recording_path)
+
+        user_speech = transcribe_audio(client, recording_path)
+        if not user_speech or len(user_speech.strip()) < 2:
+            print("  [No speech detected]")
+            speak("NO_INPUT")
+            return
+
+        print(f"  Participant: {user_speech}")
+        speak(f"HINT Context from participant: {user_speech}")
+
+        speak("FOLLOWUP_ASK")
+
+        misty.start_action(name="listen")
+        record_audio(misty, recording_path)
+
+        followup = transcribe_audio(client, recording_path)
+        if not followup or len(followup.strip()) < 2:
+            print("  [No speech detected]")
+            speak("NO_INPUT")
+            return
+
+        print(f"  Participant: {followup}")
+
+        no_indicators = [
+            "no",
+            "nope",
+            "i'm good",
+            "that's it",
+            "nothing",
+            "all good",
+            "i'm fine",
+            "nah",
+        ]
+        if any(ind in followup.lower() for ind in no_indicators):
+            speak(f"Participant said they have no more questions: {followup}")
+        else:
+            speak(f"HINT Context from participant follow-up question: {followup}")
+
     def auto_prompt_worker():
         while not stop_auto_prompts.is_set():
             now = time.monotonic()
+<<<<<<< HEAD
 
             if now >= auto_timers["next_filler"]:
                 with interaction_lock:
@@ -286,17 +322,33 @@ def main():
                     do_hint()
                 auto_timers["next_hint"] = time.monotonic() + AUTO_HINT_INTERVAL_SECONDS
 
+=======
+            if now >= next_filler:
+                with interaction_lock:
+                    speak("FILLER")
+                next_filler = now + AUTO_FILLER_INTERVAL_SECONDS
+            if now >= next_hint:
+                with interaction_lock:
+                    do_hint_flow()
+                next_hint = now + AUTO_HINT_INTERVAL_SECONDS
+>>>>>>> 6cafd58986af4393fb1c640c939b831d937af797
             stop_auto_prompts.wait(0.2)
 
     auto_thread = threading.Thread(target=auto_prompt_worker, daemon=True)
     auto_thread.start()
 
     print(COMMANDS_HELP)
-    print(f"[Auto] FILLER every {AUTO_FILLER_INTERVAL_SECONDS}s, HINT every {AUTO_HINT_INTERVAL_SECONDS}s")
+    print(
+        f"[Auto] FILLER every {AUTO_FILLER_INTERVAL_SECONDS}s, HINT every {AUTO_HINT_INTERVAL_SECONDS}s"
+    )
 
     with interaction_lock:
+<<<<<<< HEAD
         misty_speak(client, misty, chat, "INTRODUCE", speech_file_local, speech_file_url)
     reset_auto_timers()
+=======
+        speak("INTRODUCE")
+>>>>>>> 6cafd58986af4393fb1c640c939b831d937af797
 
     try:
         while True:
@@ -308,9 +360,9 @@ def main():
 
             if cmd == "QUIT":
                 break
-
             elif cmd == "INTRODUCE":
                 with interaction_lock:
+<<<<<<< HEAD
                     misty_speak(client, misty, chat, "INTRODUCE", speech_file_local, speech_file_url)
                 reset_auto_timers()
 
@@ -324,6 +376,15 @@ def main():
                     do_hint()
                 reset_auto_timers()
 
+=======
+                    speak("INTRODUCE")
+            elif cmd == "FILLER":
+                with interaction_lock:
+                    speak("FILLER")
+            elif cmd == "HINT":
+                with interaction_lock:
+                    do_hint_flow()
+>>>>>>> 6cafd58986af4393fb1c640c939b831d937af797
             else:
                 print(f"  Unknown command: {cmd}")
                 print(COMMANDS_HELP)
