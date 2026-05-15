@@ -14,12 +14,12 @@ from mistyPy.Robot import Robot
 
 load_dotenv()
 
-MISTY_IP = "128.135.202.239"
+MISTY_IP = "128.135.202.116"
 HTTP_SERVER_PORT = 8000
 
 MAX_RECORDING_SECONDS = 6
-AUTO_FILLER_INTERVAL_SECONDS = 60
-AUTO_HINT_INTERVAL_SECONDS = 120
+AUTO_FILLER_INTERVAL_SECONDS = 45
+AUTO_HINT_INTERVAL_SECONDS = 90
 
 LED_DEFAULT = (0, 0, 255)     # Idle: Blue
 LED_SPEAKING = (0, 255, 0)    # Speaking: Green
@@ -247,23 +247,44 @@ def main():
 
     stop_auto_prompts = threading.Event()
     interaction_lock = threading.Lock()
+    auto_timers = {"next_filler": time.monotonic() + AUTO_FILLER_INTERVAL_SECONDS,
+                   "next_hint": time.monotonic() + AUTO_HINT_INTERVAL_SECONDS}
+
+    def reset_auto_timers():
+        """Call after any manual interaction to avoid immediate auto-prompts."""
+        now = time.monotonic()
+        auto_timers["next_filler"] = now + AUTO_FILLER_INTERVAL_SECONDS
+        auto_timers["next_hint"] = now + AUTO_HINT_INTERVAL_SECONDS
+
+    def do_hint():
+        """Full hint interaction: ask, listen, respond, follow-up. Must be called with interaction_lock held."""
+        misty_speak(client, misty, chat, "HINT_ASK", speech_file_local, speech_file_url)
+
+        misty.start_action(name="listen")
+        record_audio(misty, recording_path)
+
+        user_speech = transcribe_audio(client, recording_path)
+        if not user_speech or len(user_speech.strip()) < 2:
+            print("  [No speech detected]")
+            misty_speak(client, misty, chat, "NO_INPUT", speech_file_local, speech_file_url)
+            return
+
+        print(f"  Participant: {user_speech}")
+        misty_speak(client, misty, chat, f"HINT Context from participant: {user_speech}", speech_file_local, speech_file_url)
 
     def auto_prompt_worker():
-        next_filler = time.monotonic() + AUTO_FILLER_INTERVAL_SECONDS
-        next_hint = time.monotonic() + AUTO_HINT_INTERVAL_SECONDS
-
         while not stop_auto_prompts.is_set():
             now = time.monotonic()
 
-            if now >= next_filler:
+            if now >= auto_timers["next_filler"]:
                 with interaction_lock:
                     misty_speak(client, misty, chat, "FILLER", speech_file_local, speech_file_url)
-                next_filler = now + AUTO_FILLER_INTERVAL_SECONDS
+                auto_timers["next_filler"] = time.monotonic() + AUTO_FILLER_INTERVAL_SECONDS
 
-            if now >= next_hint:
+            if now >= auto_timers["next_hint"]:
                 with interaction_lock:
-                    misty_speak(client, misty, chat, "HINT", speech_file_local, speech_file_url)
-                next_hint = now + AUTO_HINT_INTERVAL_SECONDS
+                    do_hint()
+                auto_timers["next_hint"] = time.monotonic() + AUTO_HINT_INTERVAL_SECONDS
 
             stop_auto_prompts.wait(0.2)
 
@@ -275,6 +296,7 @@ def main():
 
     with interaction_lock:
         misty_speak(client, misty, chat, "INTRODUCE", speech_file_local, speech_file_url)
+    reset_auto_timers()
 
     try:
         while True:
@@ -290,48 +312,17 @@ def main():
             elif cmd == "INTRODUCE":
                 with interaction_lock:
                     misty_speak(client, misty, chat, "INTRODUCE", speech_file_local, speech_file_url)
+                reset_auto_timers()
 
             elif cmd == "FILLER":
                 with interaction_lock:
                     misty_speak(client, misty, chat, "FILLER", speech_file_local, speech_file_url)
+                reset_auto_timers()
 
             elif cmd == "HINT":
                 with interaction_lock:
-                    # HINT asks participant for context first.
-                    misty_speak(client, misty, chat, "HINT_ASK", speech_file_local, speech_file_url)
-
-                    misty.start_action(name="listen")
-                    record_audio(misty, recording_path)
-
-                    user_speech = transcribe_audio(client, recording_path)
-                    if not user_speech or len(user_speech.strip()) < 2:
-                        print("  [No speech detected]")
-                        misty_speak(client, misty, chat, "NO_INPUT", speech_file_local, speech_file_url)
-                        continue
-
-                    print(f"  Participant: {user_speech}")
-                    prompt = f"HINT Context from participant: {user_speech}"
-                    misty_speak(client, misty, chat, prompt, speech_file_local, speech_file_url)
-
-                    # Ask only one follow-up question after giving a hint.
-                    misty_speak(client, misty, chat, "FOLLOWUP_ASK", speech_file_local, speech_file_url)
-
-                    misty.start_action(name="listen")
-                    record_audio(misty, recording_path)
-
-                    followup = transcribe_audio(client, recording_path)
-                    if not followup or len(followup.strip()) < 2:
-                        print("  [No speech detected]")
-                        misty_speak(client, misty, chat, "NO_INPUT", speech_file_local, speech_file_url)
-                        continue
-
-                    print(f"  Participant: {followup}")
-
-                    no_indicators = ["no", "nope", "i'm good", "that's it", "nothing", "all good", "i'm fine", "nah"]
-                    if any(ind in followup.lower() for ind in no_indicators):
-                        misty_speak(client, misty, chat, f"Participant said they have no more questions: {followup}", speech_file_local, speech_file_url)
-                    else:
-                        misty_speak(client, misty, chat, f"HINT Context from participant follow-up question: {followup}", speech_file_local, speech_file_url)
+                    do_hint()
+                reset_auto_timers()
 
             else:
                 print(f"  Unknown command: {cmd}")
